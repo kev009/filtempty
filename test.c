@@ -15,7 +15,7 @@
 
 #define PORT 5000
 
-#define MAXCLIENTS 1000
+#define MAXFD 1000
 
 #define BUFSIZE 10240
 
@@ -45,7 +45,7 @@ struct fdinfo {
 };
 
 void diep(const char *s);
-void handle_client(int c, int kq, struct fdinfo *fi);
+void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke);
 void close_client(int c, struct fdinfo *fi);
 void kev(int s, int kq, short filter, u_short flags);
 void dbg(const char *format, ...);
@@ -62,7 +62,7 @@ int main(void) {
 	int kq;
 	struct kevent ke;
 
-	struct fdinfo fi[MAXCLIENTS];
+	struct fdinfo fi[MAXFD+1];
 
 	memset(fi, 0, sizeof(fi));
 	memset(empty, 0, sizeof(empty));
@@ -138,14 +138,18 @@ int main(void) {
 		if (ke.ident == l4 || ke.ident == l6) {
 			len = (socklen_t)sizeof(sa);
 			c = accept(ke.ident, &sa, &len);
-			handle_client(c, kq, fi);
+			if (c > MAXFD) {
+				fprintf(stderr, "oops, accept returned fd greater than MAXFD: %d\n", c);
+				exit(1);
+			}
+			handle_client(c, kq, fi, &ke);
 			continue;
 		}
-		handle_client(ke.ident, kq, fi);
+		handle_client(ke.ident, kq, fi, &ke);
 	}
 }
 
-void handle_client(int c, int kq, struct fdinfo *fi) {
+void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 	char buf[BUFSIZE];
 	int n=0;
 	int i=0;
@@ -155,19 +159,19 @@ void handle_client(int c, int kq, struct fdinfo *fi) {
 	static const char hdr[] = "HTTP/1.1 200 OK\r\nServer: test\r\nContent-Length: " SENDBYTES_S "\r\n\r\n";
 
 	for (;;) {
-		switch (fi[c].state) {
+		switch (fi->state) {
 		case INIT:
 			if (fcntl(c, F_SETFL, O_NONBLOCK) < 0) {
 				diep("fcntl");
 			}
-			fi[c].state = FIRST_R;
+			fi->state = FIRST_R;
 			dbgc(c, "init");
 			break;
 		case FIRST_R:
 		case FIRST_N:
 		case SECOND_R:
 		case SECOND_N:
-			if (fi[c].state == FIRST_R || fi[c].state == SECOND_R) {
+			if (fi->state == FIRST_R || fi->state == SECOND_R) {
 				find = '\r';
 			} else {
 				find = '\n';
@@ -180,8 +184,9 @@ void handle_client(int c, int kq, struct fdinfo *fi) {
 						close_client(c, fi);
 						return;
 					}
-					if (!fi[c].reading) {
+					if (!fi->reading) {
 						kev(c, kq, EVFILT_READ, EV_ADD);
+						fi->reading = 1;
 					}
 					return;
 				}
@@ -189,40 +194,42 @@ void handle_client(int c, int kq, struct fdinfo *fi) {
 			}
 			for (; i<n; i++) {
 				if (buf[i] == find) {
-					fi[c].state++;
+					fi->state++;
 					break;
 				}
 			}
 			break;
 		case END_READ:
 			dbgc(c, "header read");
-			if (fi[c].reading) {
+			if (fi->reading) {
 				kev(c, kq, EVFILT_READ, EV_DELETE);
+				fi->reading = 0;
 			}
-			fi[c].state = WRITE_HDR;
+			fi->state = WRITE_HDR;
 			break;
 		case WRITE_HDR:
-			to_send = sizeof(hdr) - 1 - fi[c].hdr_sent;
-			n = write(c, hdr + fi[c].hdr_sent, to_send);
+			to_send = sizeof(hdr) - 1 - fi->hdr_sent;
+			n = write(c, hdr + fi->hdr_sent, to_send);
 			if (n < 0) {
 				if (errno != EAGAIN) {
 					perror("write");
 					close_client(c, fi);
 					return;
 				}
-				if (!fi[c].writing) {
+				if (!fi->writing) {
 					kev(c, kq, EVFILT_WRITE, EV_ADD);
+					fi->writing = 1;
 				}
 				return;
 			}
-			fi[c].hdr_sent += n;
-			if (fi[c].hdr_sent >= sizeof(hdr) - 1) {
+			fi->hdr_sent += n;
+			if (fi->hdr_sent >= sizeof(hdr) - 1) {
 				dbgc(c, "response header written");
-				fi[c].state = WRITE;
+				fi->state = WRITE;
 			}
 			break;
 		case WRITE:
-			to_send = SENDBYTES - fi[c].sent;
+			to_send = SENDBYTES - fi->sent;
 			if (to_send > BUFSIZE) {
 				to_send = BUFSIZE;
 			}
@@ -233,22 +240,28 @@ void handle_client(int c, int kq, struct fdinfo *fi) {
 					close_client(c, fi);
 					return;
 				}
-				if (!fi[c].writing) {
+				if (!fi->writing) {
 					kev(c, kq, EVFILT_WRITE, EV_ADD);
+					fi->writing = 1;
 				}
 				return;
 			}
-			fi[c].sent += n;
-			if (fi[c].sent >= SENDBYTES) {
+			fi->sent += n;
+			if (fi->sent >= SENDBYTES) {
 				dbgc(c, "object written");
-				if (fi[c].writing) {
+				if (fi->writing) {
 					kev(c, kq, EVFILT_WRITE, EV_DELETE);
+					fi->writing = 0;
 				}
 				kev(c, kq, EVFILT_EMPTY, EV_ADD);
-				fi[c].state = EMPTY;
+				fi->state = EMPTY;
 			}
 			break;
 		case EMPTY:
+			if (ke->filter != EVFILT_EMPTY) {
+				dbgc(c, "spurious event received, filter %d", ke->filter);
+				return;
+			}
 			dbgc(c, "send buffer empty");
 			close_client(c, fi);
 			return;
@@ -265,7 +278,7 @@ void diep(const char *s) {
 void close_client(int c, struct fdinfo *fi) {
 	close(c);
 	dbgc(c, "closed");
-	memset(fi+c, 0, sizeof(*fi));
+	memset(fi, 0, sizeof(*fi));
 }
 
 void kev(int s, int kq, short filter, u_short flags) {
