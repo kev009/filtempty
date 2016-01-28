@@ -160,6 +160,7 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 	static const char hdr[] = "HTTP/1.1 200 OK\r\nServer: test\r\nContent-Length: " SENDBYTES_S "\r\n\r\n";
 
 	for (;;) {
+	start:
 		switch (fi->state) {
 		case INIT:
 			if (fcntl(c, F_SETFL, O_NONBLOCK) < 0) {
@@ -172,12 +173,14 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 		case FIRST_N:
 		case SECOND_R:
 		case SECOND_N:
+			/* determine what to look for */
 			if (fi->state == FIRST_R || fi->state == SECOND_R) {
 				find = '\r';
 			} else {
 				find = '\n';
 			}
-			if (n == 0) {
+			/* if there is no existing data to read, read some */
+			if (n == 0 || i >= n) {
 				n = read(c, buf, BUFSIZE);
 				if (n < 0) {
 					if (errno != EAGAIN) {
@@ -191,14 +194,32 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 					}
 					return;
 				}
+				if (n == 0) {
+					dbgc(c, "client closed connection prior to sending request");
+					close_client(c, fi);
+					return;
+				}
 				i=0;
 			}
-			for (; i<n; i++) {
+			/* if we are looking for the first \r, scan for it */
+			if (fi->state == FIRST_R) {
+				for (; i<n; i++) {
+					if (buf[i] == find) {
+						fi->state++;
+						i++;
+						goto start;
+					}
+				}
+                        /* for anything else, it has to be the next character */
+			} else {
 				if (buf[i] == find) {
 					fi->state++;
+					i++;
 					break;
 				}
 			}
+			/* if we haven't matched anything, start over */
+			fi->state = FIRST_R;
 			break;
 		case END_READ:
 			dbgc(c, "header read");
