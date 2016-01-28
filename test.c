@@ -293,7 +293,10 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 
 int require_filt(int c, struct kevent *ke, short filter) {
 	if (ke->filter != filter) {
-		dbgc(c, "spurious filter %hd received, expected %hd", ke->filter, filter);
+		/* spurious write events are common, don't report it */
+		if (ke->filter != EVFILT_WRITE) {
+			dbgc(c, "spurious filter %hd received, expected %hd", ke->filter, filter);
+		}
 		return 0;
 	}
 	return 1;
