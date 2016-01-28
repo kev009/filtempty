@@ -50,6 +50,7 @@ void close_client(int c, struct fdinfo *fi);
 void kev(int s, int kq, short filter, u_short flags);
 void dbg(const char *format, ...);
 void dbgc(int c, const char *format, ...);
+int require_filt(int c, struct kevent *ke, short filter);
 
 int main(void) {
 	int l4, l6, i, c;
@@ -258,8 +259,7 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 			}
 			break;
 		case EMPTY:
-			if (ke->filter != EVFILT_EMPTY) {
-				dbgc(c, "spurious event received, filter %d", ke->filter);
+			if (!require_filt(c, ke, EVFILT_EMPTY)) {
 				return;
 			}
 			dbgc(c, "send buffer empty");
@@ -268,6 +268,14 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 			break;
 		}
 	}
+}
+
+int require_filt(int c, struct kevent *ke, short filter) {
+	if (ke->filter != filter) {
+		dbgc(c, "spurious filter %hd received, expected %hd", ke->filter, filter);
+		return 0;
+	}
+	return 1;
 }
 
 void diep(const char *s) {
