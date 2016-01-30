@@ -40,8 +40,7 @@ struct fdinfo {
 	fd_state state;
 	int sent;
 	int hdr_sent;
-	int reading;
-	int writing;
+	short filter; /* 0 if not waiting for a filter. otherwise, the filter */
 };
 
 void diep(const char *s);
@@ -50,7 +49,8 @@ void close_client(int c, struct fdinfo *fi);
 void kev(int s, int kq, short filter, u_short flags);
 void dbg(const char *format, ...);
 void dbgc(int c, const char *format, ...);
-int require_filt(int c, struct kevent *ke, short filter);
+void notify_filter(int c, int kq, short filter, struct fdinfo *fi);
+void notify_clear(int c, int kq, struct fdinfo *fi);
 
 int main(void) {
 	int l4, l6, i, c;
@@ -63,9 +63,10 @@ int main(void) {
 	int kq;
 	struct kevent ke;
 
-	struct fdinfo fi[MAXFD+1];
+	struct fdinfo fi_list[MAXFD+1];
+	struct fdinfo *fi;
 
-	memset(fi, 0, sizeof(fi));
+	memset(fi_list, 0, sizeof(fi_list));
 	memset(empty, 0, sizeof(empty));
 
 	signal(SIGPIPE, SIG_IGN);
@@ -143,10 +144,15 @@ int main(void) {
 				fprintf(stderr, "oops, accept returned fd greater than MAXFD: %d\n", c);
 				exit(1);
 			}
-			handle_client(c, kq, fi, &ke);
+			handle_client(c, kq, fi_list + c, &ke);
 			continue;
 		}
-		handle_client(ke.ident, kq, fi, &ke);
+		fi = fi_list + ke.ident;
+
+		/* only handle the client if it is waiting for this filter */
+		if (ke.filter == fi->filter) {
+			handle_client(ke.ident, kq, fi, &ke);
+		}
 	}
 }
 
@@ -188,10 +194,7 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 						close_client(c, fi);
 						return;
 					}
-					if (!fi->reading) {
-						kev(c, kq, EVFILT_READ, EV_ADD);
-						fi->reading = 1;
-					}
+					notify_filter(c, kq, EVFILT_READ, fi);
 					return;
 				}
 				if (n == 0) {
@@ -223,10 +226,7 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 			break;
 		case END_READ:
 			dbgc(c, "header read");
-			if (fi->reading) {
-				kev(c, kq, EVFILT_READ, EV_DELETE);
-				fi->reading = 0;
-			}
+			notify_clear(c, kq, fi);
 			fi->state = WRITE_HDR;
 			break;
 		case WRITE_HDR:
@@ -238,10 +238,7 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 					close_client(c, fi);
 					return;
 				}
-				if (!fi->writing) {
-					kev(c, kq, EVFILT_WRITE, EV_ADD);
-					fi->writing = 1;
-				}
+				notify_filter(c, kq, EVFILT_WRITE, fi);
 				return;
 			}
 			fi->hdr_sent += n;
@@ -262,27 +259,18 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 					close_client(c, fi);
 					return;
 				}
-				if (!fi->writing) {
-					kev(c, kq, EVFILT_WRITE, EV_ADD);
-					fi->writing = 1;
-				}
+				notify_filter(c, kq, EVFILT_WRITE, fi);
 				return;
 			}
 			fi->sent += n;
 			if (fi->sent >= SENDBYTES) {
 				dbgc(c, "object written");
-				if (fi->writing) {
-					kev(c, kq, EVFILT_WRITE, EV_DELETE);
-					fi->writing = 0;
-				}
-				kev(c, kq, EVFILT_EMPTY, EV_ADD);
+				notify_filter(c, kq, EVFILT_EMPTY, fi);
 				fi->state = EMPTY;
+				return;
 			}
 			break;
 		case EMPTY:
-			if (!require_filt(c, ke, EVFILT_EMPTY)) {
-				return;
-			}
 			dbgc(c, "send buffer empty");
 			close_client(c, fi);
 			return;
@@ -291,15 +279,22 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 	}
 }
 
-int require_filt(int c, struct kevent *ke, short filter) {
-	if (ke->filter != filter) {
-		/* spurious write events are common, don't report it */
-		if (ke->filter != EVFILT_WRITE) {
-			dbgc(c, "spurious filter %hd received, expected %hd", ke->filter, filter);
-		}
-		return 0;
+void notify_clear(int c, int kq, struct fdinfo *fi) {
+	if (fi->filter != 0) {
+		kev(c, kq, fi->filter, EV_DELETE);
+		fi->filter = 0;
 	}
-	return 1;
+}
+
+void notify_filter(int c, int kq, short filter, struct fdinfo *fi) {
+	if (fi->filter != 0) {
+		if (fi->filter == filter) {
+			return;
+		}
+		kev(c, kq, fi->filter, EV_DELETE);
+	}
+	kev(c, kq, filter, EV_ADD);
+	fi->filter = filter;
 }
 
 void diep(const char *s) {
@@ -315,7 +310,6 @@ void close_client(int c, struct fdinfo *fi) {
 
 void kev(int s, int kq, short filter, u_short flags) {
 	struct kevent ke;
-	memset(&ke, 0, sizeof(ke));
 	EV_SET(&ke, s, filter, flags, 0, 0, NULL);
 	if (kevent(kq, &ke, 1, NULL, 0, NULL) < 0) {
 		diep("kevent");
