@@ -47,8 +47,8 @@ void diep(const char *s);
 void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke);
 void close_client(int c, struct fdinfo *fi);
 void kev(int s, int kq, short filter, u_short flags);
-void dbg(const char *format, ...);
-void dbgc(int c, const char *format, ...);
+void dbg(const char *format, ...) __attribute__ ((format (printf, 1, 2)));
+void dbgc(int c, const char *format, ...) __attribute__ ((format (printf, 2, 3)));
 void notify_filter(int c, int kq, short filter, struct fdinfo *fi);
 void notify_clear(int c, int kq, struct fdinfo *fi);
 
