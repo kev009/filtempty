@@ -23,11 +23,11 @@ Current results:
 
 ```
 root@cds1166.lax:~# ./a.out
-1453961435.369544866 fd 6 init
-1453961435.369596177 fd 6 header read
-1453961435.369610859 fd 6 response header written
-1453961442.430326808 fd 6 object written
-1453961442.442290183 fd 6 spurious filter -2 received, expected -12
-1453961444.561565669 fd 6 send buffer empty
-1453961444.561598331 fd 6 closed
+1462405783.396314603 fd 6 init
+1462405783.396501372 fd 6 header read
+1462405783.396532128 fd 6 response header written
+1462405790.470430280 fd 6 object written
+1462405792.586527057 fd 6 send buffer empty
+1462405792.586551212 fd 6 sender limited: 9078 cwnd limited low: 0 cwnd limited high: 0 receiver limited 0: fastsoft: 0
+1462405792.586563196 fd 6 closed
 ```

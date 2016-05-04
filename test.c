@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <sys/event.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -41,6 +42,7 @@ struct fdinfo {
 	int sent;
 	int hdr_sent;
 	short filter; /* 0 if not waiting for a filter. otherwise, the filter */
+	struct tcp_info tcp_info;
 };
 
 void diep(const char *s);
@@ -51,6 +53,7 @@ void dbg(const char *format, ...) __attribute__ ((format (printf, 1, 2)));
 void dbgc(int c, const char *format, ...) __attribute__ ((format (printf, 2, 3)));
 void notify_filter(int c, int kq, short filter, struct fdinfo *fi);
 void notify_clear(int c, int kq, struct fdinfo *fi);
+void get_tcp_info(int c, struct tcp_info *tcp_info);
 
 int main(void) {
 	int l4, l6, i, c;
@@ -162,6 +165,7 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 	int i=0;
 	char find = 0;
 	int to_send;
+	struct tcp_info tcp_info;
 
 	static const char hdr[] = "HTTP/1.1 200 OK\r\nServer: test\r\nContent-Length: " SENDBYTES_S "\r\n\r\n";
 
@@ -272,10 +276,28 @@ void handle_client(int c, int kq, struct fdinfo *fi, struct kevent *ke) {
 			break;
 		case EMPTY:
 			dbgc(c, "send buffer empty");
+
+			get_tcp_info(c, &tcp_info);
+			dbgc(c, "sender limited: %u cwnd limited low: %u cwnd limited high: %u receiver limited %u: fastsoft: %u",
+				tcp_info.tcpi_snd_lim_snd - fi->tcp_info.tcpi_snd_lim_snd,
+				tcp_info.tcpi_snd_lim_cwnd1 - fi->tcp_info.tcpi_snd_lim_cwnd1,
+				tcp_info.tcpi_snd_lim_cwnd2 - fi->tcp_info.tcpi_snd_lim_cwnd2,
+				tcp_info.tcpi_snd_lim_rwin - fi->tcp_info.tcpi_snd_lim_rwin,
+				tcp_info.tcpi_tcp_alt_enabled);
+			memcpy(&fi->tcp_info, &tcp_info, sizeof(tcp_info));
+
 			close_client(c, fi);
 			return;
 			break;
 		}
+	}
+}
+
+void get_tcp_info(int c, struct tcp_info *tcp_info) {
+        socklen_t tcp_info_length = sizeof(*tcp_info);
+
+	if (getsockopt(c, IPPROTO_TCP, TCP_INFO, (void *)tcp_info, &tcp_info_length) != 0) {
+		diep("getsockopt");
 	}
 }
 
